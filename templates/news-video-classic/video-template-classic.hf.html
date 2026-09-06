@@ -401,10 +401,11 @@ function buildTypewriterFrames(html){
     });
   };
   walk(tmp, false);
+  const n = chars.length;          // 逻辑字符数 = 打字机逐字符的步数（与 DOM 文本长度无关）
   const frames = [];
-  for (let n = 1; n <= chars.length; n++){
+  for (let k = 1; k <= n; k++){
     let s = "", em = false;
-    for (let i = 0; i < n; i++){
+    for (let i = 0; i < k; i++){
       if (chars[i].inEm && !em) { s += "<em>"; em = true; }
       if (!chars[i].inEm && em) { s += "</em>"; em = false; }
       s += escapeHTML(chars[i].ch);
@@ -412,7 +413,7 @@ function buildTypewriterFrames(html){
     if (em) s += "</em>";
     frames.push(s);
   }
-  return frames.length ? frames : [""];
+  return { n, frames: frames.length ? frames : [""] };
 }
 
 /* ==========================================================================
@@ -428,8 +429,8 @@ function rebuildSchedule(newData){
   segs = DATA.segments.map((seg, si) => {
     const lines = seg.paragraphs.map(p => {
       const html = (typeof p === "string") ? escapeHTML(p) : p.html;
-      const frames = buildTypewriterFrames(html);
-      return { frames, n: frames.length ? frames[frames.length - 1].replace(/<[^>]*>/g, "").length : 0 };
+      const { frames, n } = buildTypewriterFrames(html);
+      return { frames, n };
     });
     const totalChars = lines.reduce((a, l) => a + l.n, 0);
     const segStart = cur;
