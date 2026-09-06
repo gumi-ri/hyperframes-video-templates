@@ -1,8 +1,10 @@
-# news-video-template-hf
+# hyperframes-video-templates
 
-9:16 竖屏「新闻 / 时政 / 企业」短视频模板集，全部基于 [HyperFrames](https://heygen.com/) 确定性渲染引擎。
+9:16 竖屏短视频模板集，全部基于 [HyperFrames](https://heygen.com/) 确定性渲染引擎。适用于资讯、政务、企业、宣传、栏目包装等多种场景。
 
 每个模板放在 `templates/<名称>/` 下，自成一体、可直接套用，也便于后续源源不断地往库里加新模板。
+
+采用 [MIT License](LICENSE)。
 
 ## 结构
 
