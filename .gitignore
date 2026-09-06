@@ -1,0 +1,11 @@
+# 渲染输出
+/renders/
+*.mp4
+*.png
+
+# 本地字体缓存（由渲染脚本重新生成）
+/assets/hf-fonts/
+
+# 依赖与系统产物
+node_modules/
+.DS_Store

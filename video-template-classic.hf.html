@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<!-- hyperframes 合成：视口必须与合成尺寸一致（竖向 1080x1920） -->
+<meta name="viewport" content="width=1080, height=1920" />
+<title>智造莲城 · 视频模板（hyperframes 版）</title>
+
+<!--
+  ============================================================================
+  智造莲城 9:16 竖屏视频模板 —— HyperFrames 确定性渲染版（可编辑）
+  ============================================================================
+  【和原版的关系】
+    原 video-template-classic.html 是"墙钟式"实时动画（setTimeout 打字机 / CSS 过渡），
+    无法被 hyperframes 的逐帧 seek 引擎驱动。本文件把它改造成"由时间精确推导"的
+    确定性合成：任意时刻 t 的画面 = renderAt(t) 的结果，seek 任意帧结果一致。
+
+  【怎么用（沿用原版的可编辑契约）】
+    1. 改内容：编辑 <script> 顶部的 TEMPLATE_DATA（标题 / 图文段落 / 节奏参数），
+       和原版一模一样，无需触碰渲染逻辑。
+    2. 出视频：
+         npx hyperframes render -c video-template-classic.hf.html -o out.mp4
+    3. 换内容重新出片：改完 TEMPLATE_DATA 再跑一次上面的命令即可。
+
+  【对外接口（保留原版契约，供脚本调用）】
+    window.VideoTemplate.setData(obj)   替换整份数据并重建时间线（可编辑性入口）
+    window.VideoTemplate.restart()      重新构建并播放
+    window.VideoTemplate.getData()      读取当前数据
+    window.VideoTemplate.estimateMs()   估算一轮播放总时长（毫秒）
+
+  【确定性原理】
+    所有动效（标题滑入 / 图片动感模糊入场退场 / 打字机逐字揭示）都由
+    renderAt(t) 按当前时间 t 纯函数推导，写入元素内联样式与 innerHTML。
+    GSAP 时间线仅作为"可 seek 的时钟"驱动 onUpdate 回调，hyperframes 对每条
+    轨迹调用 timeline.seek() → onUpdate → renderAt() → 浏览器绘制 → 截图。
+    因此输出与播放是否顺畅无关，逐帧确定、可复现。
+
+  【画布规格】逻辑 405 x 720（9:16），经 transform:scale 矢量放大到 1080 x 1920，
+    文字/图形按 1080 分辨率重新光栅化，出片清晰不发虚。
+  ============================================================================
+-->
+
+<!-- 字体：标题=思源黑体(Noto Sans SC)，正文=思源宋体(Noto Serif SC)。
+     两者均为系统已安装字体（本地解析，无需任何联网/CDN）。 -->
+
+<style>
+/* ==========================================================================
+   1. 尺寸与配色变量 —— 调版式/配色基本只需要动这里
+   ========================================================================== */
+:root {
+  /* --- 逻辑画布（405x720 的基准）--- */
+  --canvas-w: 405px;
+  --canvas-h: 720px;
+  /* 矢量放大倍数：1080/405 = 2.666667，出片 1080x1920 */
+  --scale: 2.666667;
+
+  /* --- 白框（内容卡片的外框）--- */
+  --frame-inset-x: 30px;
+  --frame-top: 20px;
+  --frame-bottom: 64px;
+  --frame-line: 3px;
+
+  /* --- 顶部 logo 白条 --- */
+  --topbar-h: 54px;
+
+  /* --- 标题三色带 --- */
+  --title-top: 78px;
+  --title-h: 126px;
+  --title-gap: 0px;
+  --title1-shift: 0px;
+
+  /* --- 图片区（满宽）--- */
+  --img-top: 244px;
+  --img-h: 234px;
+
+  /* --- 正文区 --- */
+  --text-pad-top: 4px;
+  --text-pad-x: 48px;
+
+  /* --- 配色 --- */
+  --bar-red: #c8181f;
+  --bar-red-dark: #8d0e13;
+  --bar-yellow: #f5c518;
+  --text-yellow: #ffd83d;
+  --text-red: #e62129;
+  --text-stroke-w: 3px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+/* 合成页尺寸 = 输出分辨率 1080x1920，overflow hidden */
+html, body { width: 1080px; height: 1920px; overflow: hidden; }
+body { background: #0d0d0f; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+
+/* ==========================================================================
+   2. 合成容器：铺满 1080x1920，内部 .video-wrap 以逻辑尺寸绘制再放大
+   ========================================================================== */
+#stage {
+  position: relative;
+  width: 1080px;
+  height: 1920px;
+  overflow: hidden;
+  background: #0d0d0f;
+}
+
+.video-wrap {
+  position: absolute;
+  top: 0; left: 0;
+  width: var(--canvas-w);
+  height: var(--canvas-h);
+  transform-origin: 0 0;
+  transform: scale(var(--scale));
+  overflow: hidden;
+  background: #1a1a1a;
+  /* 正文/默认字体 = 思源宋体（标题在 .bar 里单独换成黑体） */
+  font-family: "Noto Serif SC", "Source Han Serif SC", "思源宋体",
+               "Noto Serif CJK SC", "Songti SC", "STSong", "SimSun", "宋体", serif;
+}
+
+/* ==========================================================================
+   3. 图层顺序（z-index 总表）
+      1  背景模糊层      当前图片放大模糊
+      2  正文背景层      图片下方的深色渐变
+      3  图片层          满宽
+      4  标题层          三色带
+      5  白框
+      6  顶部白条        logo 区
+   ========================================================================== */
+
+/* --- 3.1 背景模糊层（CSS 实时 blur）--- */
+.bg-layer {
+  position: absolute; inset: 0;
+  background-size: cover; background-position: center;
+  background-color: #101012;
+  filter: blur(34px) saturate(1.35) brightness(0.85);
+  transform: scale(1.2);
+  z-index: 1;
+}
+.bg-layer::after { content: ""; position: absolute; inset: 0; background: rgba(60,20,20,0.12); }
+
+/* --- 3.2 正文区 --- */
+.text-stage {
+  position: absolute;
+  left: 0; right: 0;
+  top: calc(var(--img-top) + var(--img-h));
+  bottom: 0;
+  z-index: 2;
+  padding: var(--text-pad-top) var(--text-pad-x) 0;
+  background: linear-gradient(180deg,
+    rgba(10,5,5,0) 0%,
+    rgba(15,8,8,0.72) 16%,
+    rgba(15,8,8,0.80) 100%);
+  color: var(--text-yellow);
+  font-size: 17px;
+  line-height: 1.6;
+  font-weight: 700;
+  overflow: hidden;
+}
+.text-line {
+  margin: 0 0 1px;
+  min-height: 28px;
+  opacity: 0;
+  -webkit-text-stroke: var(--text-stroke-w) #000;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 4px rgba(0,0,0,0.55);
+  text-rendering: geometricPrecision;
+}
+.text-line .caret {
+  display: inline-block;
+  width: 3px; height: 0.95em;
+  background: var(--text-yellow);
+  vertical-align: -2px; margin-left: 2px;
+}
+.text-line em {
+  font-style: normal;
+  color: #ffffff;
+  font-weight: 900;
+  -webkit-text-stroke: var(--text-stroke-w) var(--text-red);
+  paint-order: stroke fill;
+  text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+}
+
+/* --- 3.3 图片层：满宽，z-index 低于白框 --- */
+.image-stage {
+  position: absolute;
+  left: 0; right: 0;
+  top: var(--img-top);
+  height: var(--img-h);
+  z-index: 3;
+  overflow: hidden;
+}
+.image-card { position: absolute; inset: 0; background: #000; overflow: hidden; }
+.image-card img { width: 100%; height: 100%; object-fit: cover; object-position: center center; display: block; }
+
+/* --- 3.4 标题三色带 --- */
+.title-block {
+  position: absolute;
+  top: var(--title-top);
+  left: var(--frame-inset-x);
+  right: var(--frame-inset-x);
+  z-index: 4;
+  display: flex; flex-direction: column;
+  gap: var(--title-gap);
+  /* 高度死线：标题块固定占满 标题顶→图片顶 的高度，间距恒为 0、绝不为负；
+     三根色带 flex 等分，文字垂直居中，把 白框→图片 整段用足。 */
+  height: calc(var(--img-top) - var(--title-top));
+  max-height: calc(var(--img-top) - var(--title-top));
+  overflow: hidden;
+}
+.bar {
+  flex: 1 1 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 10px;
+  font-family: "Noto Sans SC", "Source Han Sans SC", "思源黑体",
+               "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+  opacity: 0;
+}
+.bar.red-top {
+  background: transparent;
+  color: #e62129;
+  position: relative;
+  top: var(--title1-shift);
+  -webkit-text-stroke: 4px #fff;
+  paint-order: stroke fill;
+  text-shadow: none;
+  font-size: 31px;
+}
+.bar.yellow {
+  background: linear-gradient(180deg, #ffd34d 0%, var(--bar-yellow) 50%, #d99e00 100%);
+  color: #111111;
+  font-size: 24px;
+}
+.bar.red-bottom {
+  background: linear-gradient(180deg, #d81820 0%, var(--bar-red) 50%, var(--bar-red-dark) 100%);
+  color: #ffffff;
+  font-size: 32px;
+  -webkit-text-stroke: 2px #000;
+  paint-order: stroke fill;
+}
+
+/* --- 3.5 白框 --- */
+.white-frame {
+  position: absolute;
+  top: var(--frame-top);
+  left: var(--frame-inset-x);
+  right: var(--frame-inset-x);
+  bottom: var(--frame-bottom);
+  border: var(--frame-line) solid #ffffff;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* --- 3.6 顶部白条（logo 区）--- */
+.topbar {
+  position: absolute;
+  top: var(--frame-top);
+  left: var(--frame-inset-x);
+  right: var(--frame-inset-x);
+  height: var(--topbar-h);
+  background: #ffffff;
+  z-index: 6;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0 14px;
+}
+.brand .logo-zh { color: #1a4fb3; font-weight: 900; font-size: 25px; letter-spacing: 1.5px; line-height: 1; font-style: normal; }
+.brand .logo-sub { font-size: 9px; color: #7a7a7a; letter-spacing: 1.2px; margin-top: 3px; }
+.deco {
+  width: 74px; height: 44px;
+  background:
+    radial-gradient(circle at 78% 22%, #ffa31a 0 6px, transparent 7px),
+    radial-gradient(circle at 60% 55%, #ff7a00 0 5px, transparent 6px),
+    radial-gradient(circle at 90% 60%, #ff9a1a 0 4px, transparent 5px),
+    radial-gradient(circle at 45% 20%, #6cb043 0 3px, transparent 4px),
+    linear-gradient(115deg, transparent 46%, #6cb043 46% 48%, transparent 49%),
+    linear-gradient(75deg, transparent 55%, #5a9c38 55% 57%, transparent 58%);
+  background-repeat: no-repeat;
+}
+</style>
+</head>
+
+<body>
+<div id="stage" data-composition-id="main" data-width="1080" data-height="1920" data-fps="30">
+  <div class="video-wrap" id="videoWrap">
+    <div class="bg-layer" id="bgLayer"></div>
+
+    <div class="text-stage" id="textStage">
+      <!-- 预创建固定数量的正文行，renderAt 按需刷新内容；多出的行 opacity=0 -->
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+      <p class="text-line"><span class="content"></span><span class="caret"></span></p>
+    </div>
+
+    <div class="white-frame"></div>
+
+    <div class="topbar">
+      <div class="brand">
+        <div>
+          <div class="logo-zh">智造莲城</div>
+          <div class="logo-sub">ZHIZAO LIANCHENG</div>
+        </div>
+      </div>
+      <div class="deco"></div>
+    </div>
+
+    <div class="title-block" id="titleBlock">
+      <div class="bar red-top"    id="bar1"></div>
+      <div class="bar yellow"     id="bar2"></div>
+      <div class="bar red-bottom" id="bar3"></div>
+    </div>
+
+    <div class="image-stage" id="imageStage"></div>
+  </div>
+</div>
+
+<script src="./vendor/gsap.min.js"></script>
+<script>
+/* ==========================================================================
+   1. 内容配置  —— 改视频内容就改这里（与原版完全一致）
+   --------------------------------------------------------------------------
+   titles     : 三行标题
+   segments   : 图文段落数组，每段 = 一张图 + 若干行正文
+                paragraphs 每行一条：
+                    "普通文字"                  → 黄字黑描边
+                    { html: "普通<em>重点</em>" } → <em> 为白字红描边
+   ========================================================================== */
+const TEMPLATE_DATA = {
+  titles: ["某智能装备产业园开工", "智能制造产线全面铺开", "年产值有望突破五十亿"],
+  segments: [
+    {
+      image: "./images/pic_1043.jpg",
+      paragraphs: [
+        { html: "<em>近日，</em>全市重点项目集中开工" },
+        "仪式在经开区举行。",
+        "某智能装备产业园正式动工，",
+        { html: "预计<em>2027年</em>建成投产。" }
+      ]
+    },
+    {
+      image: "./images/pic_1062.jpg",
+      paragraphs: [
+        "园区将集聚上下游配套企业",
+        { html: "打造<em>智能制造</em>全产业链。" },
+        "同步引入数字化管理平台。"
+      ]
+    },
+    {
+      image: "./images/pic_1077.jpg",
+      paragraphs: [
+        { html: "投产后预计<em>带动就业两千人</em>，" },
+        "年产值有望突破五十亿元，",
+        "为地方经济高质量发展注入新动能。"
+      ]
+    }
+  ],
+
+  /* ---------- 2. 播放节奏参数（毫秒）---------- */
+  perCharMs: 90,      // 打字机每字间隔（整段连续，含跨行）
+  segHoldMs: 1600,    // 每段播完后的停留
+  imgInMs: 650,       // 图片入场动画时长（本合成中实际入场曲线用于前 0.55s）
+  loop: true          // 仅影响实时预览；渲染固定播一轮
+};
+
+/* ==========================================================================
+   2. 工具函数
+   ========================================================================== */
+const $ = (id) => document.getElementById(id);
+
+function escapeHTML(s){
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function clamp(v, lo, hi){ return v < lo ? lo : (v > hi ? hi : v); }
+
+/** 三次缓出（近似 CSS easeOutCubic） */
+function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
+
+/** 三段式缓出带回弹（近似原版 barSlide 的 cubic-bezier(.2,.7,.3,1.35)） */
+function easeOutBack(t, s){
+  s = s || 1.35;
+  const p = 1 - t;
+  return 1 - (p * p * ((s + 1) * p - s));
+}
+
+/** 把一段含 <em> 的 HTML 拆成"逐字前缀"数组，每个前缀都是完整合法的 HTML */
+function buildTypewriterFrames(html){
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  const chars = [];
+  const walk = (node, inEm) => {
+    node.childNodes.forEach(n => {
+      if (n.nodeType === 3) { for (const ch of n.textContent) chars.push({ ch, inEm }); }
+      else if (n.nodeType === 1) walk(n, inEm || n.tagName.toLowerCase() === "em");
+    });
+  };
+  walk(tmp, false);
+  const frames = [];
+  for (let n = 1; n <= chars.length; n++){
+    let s = "", em = false;
+    for (let i = 0; i < n; i++){
+      if (chars[i].inEm && !em) { s += "<em>"; em = true; }
+      if (!chars[i].inEm && em) { s += "</em>"; em = false; }
+      s += escapeHTML(chars[i].ch);
+    }
+    if (em) s += "</em>";
+    frames.push(s);
+  }
+  return frames.length ? frames : [""];
+}
+
+/* ==========================================================================
+   3. 数据 → 时间线安排
+   ========================================================================== */
+let DATA;
+let segs = [];   // 每个段: { image, lines:[{frames,n}], chars, segStart, textStart, totalChars, segDur, end }
+let totalMs = 0;
+
+function rebuildSchedule(newData){
+  DATA = newData || TEMPLATE_DATA;
+  let cur = 0;
+  segs = DATA.segments.map((seg, si) => {
+    const lines = seg.paragraphs.map(p => {
+      const html = (typeof p === "string") ? escapeHTML(p) : p.html;
+      const frames = buildTypewriterFrames(html);
+      return { frames, n: frames.length ? frames[frames.length - 1].replace(/<[^>]*>/g, "").length : 0 };
+    });
+    const totalChars = lines.reduce((a, l) => a + l.n, 0);
+    const segStart = cur;
+    const textStart = segStart + DATA.imgInMs;
+    const textDur = totalChars * DATA.perCharMs;
+    const segDur = DATA.imgInMs + textDur + DATA.segHoldMs + 350; // 350=图片退场
+    const end = segStart + segDur;
+    cur = end;
+    return { image: seg.image, lines, totalChars, segStart, textStart, textDur, segDur, end };
+  });
+  totalMs = cur;
+}
+
+/* ==========================================================================
+   4. 确定性渲染：renderAt(t) —— 任意时刻的画面纯函数
+   ========================================================================== */
+const barEls = [ $("bar1"), $("bar2"), $("bar3") ];
+const barsDelay = [150, 350, 550];   // 与三段式入场错峰
+const BAR_IN_MS = 600;
+const TEXT_LINES = [...document.querySelectorAll(".text-stage .text-line")];
+
+/** 把标题写入三根色带：允许折行，并尽力最大化字号——
+    先按每根色带实际宽度倒推最大字号；再用"高度死线"（图片区顶部）整体压低，
+    使三根色带恰好铺满 白框→图片 之间的高度，间距趋近 0 且绝不为负。 */
+function renderTitles(){
+  if (!barEls.length) return;
+  for (let i = 0; i < 3; i++){
+    const el = barEls[i];
+    if (!el) continue;
+    el.textContent = (DATA.titles && DATA.titles[i]) || "";
+    el.style.whiteSpace = "normal";       // 允许长标题折行
+    el.style.textAlign = "center";
+    el.style.lineHeight = "1.12";
+    el.style.fontSize = "";               // 清掉上一帧的换算结果，从 nv 基准重新计算
+  }
+  fitTitlesToBounds();
+}
+
+/** 中英文按近似字宽折算：全角=1，半角≈0.55（用于按宽度估算一行最多能放多少字） */
+function unitWidth(s){
+  let u = 0;
+  for (const ch of s){ u += /[^\x00-\x7F]/.test(ch) ? 1 : 0.55; }
+  return u;
+}
+
+const MAX_TITLE_FS = 54;   // 单根色带字号上限
+const MIN_TITLE_FS = 14;   // 极端情形下限
+
+/** 最大化字号并守住高度死线：
+    三根色带已由 flex 等分填满 标题顶→图片顶 的高度（间距恒为0）；
+    这里只需让每根的内部文字不超过它的色带高度（scrollHeight<=offsetHeight），
+    保证不裁切、不越线。 */
+function fitTitlesToBounds(){
+  const alive = barEls.filter(e => e && e.textContent);
+  if (!alive.length) return;
+
+  const padW = 20;                                  // 色带左右 padding 10+10
+  // 1) 宽度优先：每根独立按实际可用宽度取最大字号
+  const sizes = alive.map(el =>
+    Math.min(Math.floor((el.clientWidth - padW) / Math.max(unitWidth(el.textContent), 1)), MAX_TITLE_FS)
+  );
+  alive.forEach((el, i) => el.style.setProperty("font-size", sizes[i] + "px", "important"));
+
+  // 2) 装入色带：若整段文字高度超过所在色带高度（折成两行也不足以放下），逐步收小
+  for (let g = 0; g < 96; g++){
+    let overflow = false;
+    for (const el of alive){
+      if (el.scrollHeight > el.offsetHeight){
+        const fs = parseFloat(getComputedStyle(el).fontSize) || MIN_TITLE_FS;
+        el.style.setProperty("font-size", Math.max(fs - 1, MIN_TITLE_FS) + "px", "important");
+        overflow = true;
+      }
+    }
+    if (!overflow) break;   // 全部装进各自的色带
+  }
+}
+
+/** 标题三色带：从左侧滑入（带轻微回弹），随后常驻 */
+function renderBars(t){
+  for (let i = 0; i < 3; i++){
+    const el = barEls[i];
+    if (!el) continue;
+    const p = clamp((t - barsDelay[i]) / BAR_IN_MS, 0, 1);
+    if (p >= 1){ el.style.opacity = "1"; el.style.transform = "translateX(0%)"; }
+    else if (p > 0){
+      const k = easeOutBack(p);
+      el.style.opacity = "1";
+      el.style.transform = `translateX(${(-130 + 136 * k).toFixed(2)}%)`;
+    } else { el.style.opacity = "0"; }
+  }
+}
+
+/** 图片动感模糊阶段样式。phase: -1=隐藏 / 0=入场 / 1=常驻 / 2=退场 */
+function cardStyleAt(card, phase, p){
+  if (phase === -1){ card.style.opacity = "0"; card.style.transform = "translateX(60%) scaleX(2.2) skewX(18deg)"; card.style.filter = "blur(28px) brightness(1.25)"; return; }
+  if (phase === 1){ card.style.opacity = "1"; card.style.transform = "translateX(0) scaleX(1) skewX(0)"; card.style.filter = "blur(0) brightness(1)"; return; }
+  const k = easeOutCubic(clamp(p, 0, 1));
+  if (phase === 0){
+    // 动感模糊入场：60%→0 位移、scaleX 2.2→1、skew 18→0、blur 28→0、alpha 0→1
+    card.style.opacity = String(k).slice(0, 4);
+    card.style.transform = `translateX(${(60 * (1 - k)).toFixed(2)}%) scaleX(${(1 + 1.2 * (1 - k)).toFixed(3)}) skewX(${(18 * (1 - k)).toFixed(2)}deg)`;
+    card.style.filter = `blur(${(28 * (1 - k)).toFixed(1)}px) brightness(${(1 + 0.25 * (1 - k)).toFixed(3)})`;
+  } else {
+    // 退场：0→-60% 位移、scaleX/透明度反向
+    card.style.opacity = String(1 - k).slice(0, 4);
+    card.style.transform = `translateX(${( -60 * k).toFixed(2)}%) scaleX(${(1 + 1.2 * k).toFixed(3)}) skewX(${(-18 * k).toFixed(2)}deg)`;
+    card.style.filter = `blur(${(28 * k).toFixed(1)}px) brightness(${(1 + 0.2 * k).toFixed(3)})`;
+  }
+}
+
+/** 背景模糊层：切到当前段图片 */
+function renderBg(seg){
+  const bg = $("bgLayer");
+  bg.style.backgroundImage = seg ? `url(${seg.image})` : "none";
+}
+
+/** 正文：整段连续打字机，某时刻字符进度 = f(t)，逐行消耗字符预算 */
+function renderText(activeIdx, t){
+  let seg = activeIdx >= 0 ? segs[activeIdx] : null;
+  if (seg && !(t >= seg.segStart && t < seg.end)) seg = null;
+  if (!seg){
+    for (const el of TEXT_LINES){
+      el.style.opacity = "0";
+      el.querySelector(".content").innerHTML = "";
+      el.querySelector(".caret").style.display = "none";
+    }
+    return;
+  }
+  const typed = t >= seg.textStart
+    ? clamp(Math.floor((t - seg.textStart) / DATA.perCharMs), 0, seg.totalChars)
+    : 0;
+  let budget = typed;
+  for (let i = 0; i < TEXT_LINES.length; i++){
+    const el = TEXT_LINES[i];
+    const content = el.querySelector(".content");
+    const caret = el.querySelector(".caret");
+    if (i >= seg.lines.length){ el.style.opacity = "0"; content.innerHTML = ""; caret.style.display = "none"; continue; }
+    const line = seg.lines[i];
+    if (budget <= 0){ el.style.opacity = "0"; content.innerHTML = ""; caret.style.display = "none"; continue; }
+    if (budget >= line.n){
+      content.innerHTML = line.frames[line.frames.length - 1];
+      el.style.opacity = "1"; caret.style.display = "none";
+    } else {
+      content.innerHTML = line.frames[clamp(budget, 1, line.n) - 1];
+      el.style.opacity = "1"; caret.style.display = "inline-block";
+    }
+    budget -= line.n;
+  }
+}
+
+/** 主渲染入口：给定毫秒时间，刷新整幅画面 */
+function renderAt(t){
+  // 标题（0~0.7s 内入场）
+  renderBars(t);
+
+  // 定位当前活动段
+  let activeIdx = -1;
+  for (let i = 0; i < segs.length; i++){
+    if (t >= segs[i].segStart && t < segs[i].end){ activeIdx = i; break; }
+  }
+  const active = activeIdx >= 0 ? segs[activeIdx] : null;
+  renderBg(active);
+
+  // 图片卡片：每段一张预置卡片，按各自时段推进
+  const cards = document.querySelectorAll("#imageStage .image-card");
+  for (let i = 0; i < cards.length; i++){
+    const card = cards[i];
+    const s = segs[i];
+    const local = t - s.segStart;
+    let phase, p;
+    if (local < 0 || local >= s.segDur){ card.style.opacity = "0"; continue; }
+    if (local < 550){ phase = 0; p = local / 550; }               // 入场（前 0.55s）
+    else if (local > s.segDur - 350){ phase = 2; p = (local - (s.segDur - 350)) / 350; } // 退场
+    else { phase = 1; p = 1; }                                    // 常驻
+    cardStyleAt(card, phase, p);
+  }
+
+  // 正文打字机
+  renderText(activeIdx, t);
+}
+
+/* ==========================================================================
+   5. GSAP 时间线（hyperframes 的 seek 时钟）+ 对外接口
+   ========================================================================== */
+let tl;
+const state = { ready: false, finished: false, segIndex: 0 };
+
+function estimateMs(){ return totalMs; }
+
+function rebuild(){
+  const total = totalMs / 1000;
+  renderTitles();            // 把 DATA.titles 写入三根标题色带
+  if (window.gsap){
+    tl = gsap.timeline({ paused: true, onUpdate(){ renderAt(tl.time() * 1000); } });
+    tl.to({}, { duration: Math.max(total, 0.001) });
+  }
+  window.__timelines = window.__timelines || {};
+  window.__timelines["main"] = tl;
+  renderAt(0);
+  state.ready = true;
+}
+
+window.VideoTemplate = {
+  state,
+  estimateMs,
+  setData(newData){
+    rebuildSchedule(Object.assign(JSON.parse(JSON.stringify(TEMPLATE_DATA)), newData || {}));
+    rebuild();
+    state.finished = false;
+  },
+  restart(){ rebuild(); state.finished = false; },
+  getData(){ return DATA; },
+  done(){ state.finished = true; }
+};
+
+/* ==========================================================================
+   6. 启动：用默认数据构建时间线；并预取图片/字体提升首帧质量
+   ========================================================================== */
+rebuildSchedule(TEMPLATE_DATA);
+window.__timelines = window.__timelines || {};
+
+// 预创建每段的图片卡片（保证图片随页面一起加载，渲染时按索引稳定存在）
+(function buildCards(){
+  const stage = $("imageStage");
+  DATA.segments.forEach(seg => {
+    const card = document.createElement("div");
+    card.className = "image-card";
+    const img = document.createElement("img");
+    img.src = seg.image;
+    img.alt = "";
+    card.appendChild(img);
+    stage.appendChild(card);
+  });
+})();
+
+// 注册时间线（gsap 在上一 <script> 同步就绪，本地 vendor 加载）
+if (window.gsap) rebuild();
+else window.addEventListener("load", rebuild);
+</script>
+</body>
+</html>
